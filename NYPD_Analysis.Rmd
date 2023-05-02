@@ -1,0 +1,326 @@
+---
+title: "NYPD Shooting Incidents Report:  Seasonality, Geographic clusters, and Predictions of Shooting Incidents"
+output: html_document
+---
+
+# Introduction
+### The purpose of this report is:
+1. Understand the overall trend of NY shooting incidents over the last 15 years within each borough, and Visualize the geographic distribution of shooting incidents.
+2. Identify any seasonality present.
+3. Predict the number of shooting incidents monthly for 2023 across NY and within each of the boroughs.
+
+```{r setup, include=FALSE, echo=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(lubridate)
+library(readr)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(leaflet)
+library(leaflet.extras)
+library(reshape2)
+library(forecast)
+```
+
+
+# About the data
+This data includes every shooting incident that occurred in New York City from 2006 till the end of the last year. It includes the date, time and location of each incident as well as demographic information about the suspects and victims.
+The source of this data is the NYPD Shooting Incident Data (Historic) dataset from  https://catalog.data.gov/dataset 
+
+Here is a preview of the raw data:
+
+```{r import_data, message=FALSE, echo = TRUE}
+
+nypd_data <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+
+head(nypd_data, 10)
+```
+
+# Data Cleanup and Preparation
+Steps include:
+
+1. Drop the columns with more than 50% missing data. 
+
+2. For other columns, replace missing values with "N/A". 
+
+3. Change the date column to the right data type.
+
+4. Drop unnecessary column(s).
+
+Showing a summary of the data before and after cleanup.
+
+```{r clean_data, echo=TRUE}
+summary(nypd_data)
+missing_pct <- colMeans(is.na(nypd_data))
+drop_cols <- which(missing_pct > 0.5)
+nypd_data <- subset(nypd_data, select = -drop_cols)
+
+nypd_data <- nypd_data[complete.cases(nypd_data[c("Latitude", "Longitude")]), ]
+
+
+nypd_data <- nypd_data %>% 
+  mutate(across(-OCCUR_TIME, ~ifelse(is.na(.), "N/A", .)))
+
+nypd_data$OCCUR_DATE <- as.Date(nypd_data$OCCUR_DATE, format = "%m/%d/%Y")
+
+summary(nypd_data)
+```
+
+# Data Visualization
+
+
+### What is the distribution of shooting incidents by borough? Are there boroughs with more or less shooting incidents?
+
+```{r visualize_data, echo = TRUE}
+grb_by_boro <- nypd_data %>% group_by(BORO) %>% 
+  summarize(incidents = n())
+
+ggplot(grb_by_boro, aes(x=BORO, y=incidents, fill=BORO)) +
+  geom_bar(stat="identity") +
+  xlab("BOROUGH") + ylab("INCIDENCES") +
+  ggtitle("Shooting Incidents by Borough") +
+  theme_minimal()
+```
+
+
+### Boroughs ordered by most to least number of shooting incidents:
+
+
+```{r table_bouroughs_ordered_by_incidents, echo = TRUE}
+nypd_data %>% 
+  group_by(BORO) %>% 
+  summarise(incidents = n()) %>% 
+  arrange(desc(incidents))
+```
+
+#### Key Takeaway
+Brooklyn and Bronx seem to have the highest number of reported shooting incidents compared to the other boroughs, while Staten Island seems to have the lowest.
+
+
+
+
+
+### Has this distribution changed over time?
+
+```{r visualize_data_2, echo = TRUE}
+grb_by_boro_year <- nypd_data %>% group_by(BORO, year = format(OCCUR_DATE, "%Y")) %>% 
+  summarize(incidents = n(), .groups = 'rowwise') %>% ungroup()
+
+  
+plot_ly(grb_by_boro_year, x = ~year, y = ~incidents, color = ~BORO, type = "scatter", mode = "lines", opacity = 1) %>%
+  layout(title = "Shooting Incidents by Borough Over Time",
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Number of Incidents"))
+```
+
+
+#### Key Takeaway
+Over time, the difference in the number of shooting incidents that occurred in Brooklyn and the Bronx has decreased.
+
+Manhattan exceeded Queens for the number of shooting incidents starting in 2021. This could be an interesting trend to monitor.
+
+The number of shooting incidents in Staten Island has remained fairly stable over the past 15 years.
+
+
+
+### Where did these shooting incidents occur? 
+#### *Zoom in/out of the interactive heat map*
+
+```{r heatmap, echo = TRUE}
+
+center_latitude <- mean(nypd_data$Latitude)
+center_longitude <- mean(nypd_data$Longitude)
+
+nypd_data %>% 
+  leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = center_longitude, lat = center_latitude, zoom = 12) %>%
+  addHeatmap(lng=~as.numeric(nypd_data$Longitude),
+             lat=~as.numeric(nypd_data$Latitude),
+             radius = 8)
+```
+
+# Data Analysis
+#### For this analysis, we will be looking at 3 main questions: 
+1. What is the trajectory of shooting incidents over time? 
+2. What percentage of shooting incidents were murders and has this number changed over time?
+3. Is there any seasonality?
+
+
+```{r incidents_over_time, echo = TRUE}
+nypd_data <- nypd_data %>%
+  mutate(month_year = format(OCCUR_DATE, "%Y-%m"))
+
+incidents_by_month <- nypd_data %>%
+  group_by(month_year) %>%
+  summarise(incidents = n())
+
+plot_ly(data = incidents_by_month, x = ~month_year, y = ~incidents, type = "scatter",
+        mode = "lines+markers", line = list(color = "red"), marker = list(size = 5)) %>%
+  layout(xaxis = list(title = "Month-Year"), yaxis = list(title = "Number of Incidents"),
+         title = "Number of Shooting Incidents by Month-Year")
+
+incidents_by_month <- nypd_data %>%
+  group_by(month_year) %>%
+  summarise(total = n(), murders = sum(STATISTICAL_MURDER_FLAG))
+
+incidents_by_month$percent_murders <- incidents_by_month$murders / incidents_by_month$total * 100
+
+plot_ly(data = incidents_by_month, x = ~month_year, y = ~percent_murders, type = "scatter",
+        mode = "lines+markers", line = list(color = "red"), marker = list(size = 5)) %>%
+  layout(xaxis = list(title = "Month-Year"), yaxis = list(title = "Percent of Incidents that were Murders"),
+         title = "Percentage of Shooting Incidents that were Murders by Month-Year")
+
+nypd_data <- nypd_data %>%
+  mutate(day_of_week = weekdays(OCCUR_DATE))
+
+incidents_by_dow <- nypd_data %>%
+  group_by(day_of_week) %>%
+  summarise(incidents = n())
+
+ggplot(data = incidents_by_dow, aes(x = day_of_week, y = incidents)) +
+  geom_bar(stat = "identity", fill = "red") +
+  scale_x_discrete(name = "Day of Week") +
+  scale_y_continuous(name = "Number of Incidents", expand = c(0, 0)) +
+  theme_minimal() +
+  ggtitle("Number of Shooting Incidents by Day of the Week")
+```
+
+
+
+#### Key Takeaways
+
+There seemed to be a spike in shooting incidents reported in the summer of 2020. Between 2017 and 2019, the overall number of incidents seemed lower.
+
+There does seem to be seasonality present within the year and through the week.
+
+Shooting incidents seem to **spike between June and August** of each year, while shooting incidents are **least likely to occur in February**.
+
+The number of shooting incidents **spikes over the weekends** so there is some seasonality present within the week.
+
+There doesn't seem to be anything that stands out when looking at the rate of shooting incidents that result in murder over time.
+
+# Data Modeling
+
+
+
+```{r predmodel, echo = TRUE}
+incidents_by_date <- nypd_data %>%
+  mutate(date = as.Date(OCCUR_DATE, "%m/%d/%Y")) %>%
+  group_by(date) %>%
+  summarise(total_incidents = n(), .groups = 'rowwise') %>% ungroup()
+
+incidents_ts <- ts(incidents_by_date$total_incidents, start = c(2006, 1), frequency = 12)
+
+sarima_model <- auto.arima(incidents_ts, seasonal = TRUE)
+
+forecast_values <- forecast(sarima_model, h = 12)
+
+plot_ly(data.frame(month = seq(as.Date("2023-01-01"), as.Date("2023-12-01"), by = "month"), total_incidents = forecast_values$mean), x = ~month, y = ~total_incidents, type = "scatter", mode = "lines") %>%
+  layout(title = "Predicted Number of Shooting Incidents by Month in 2023", xaxis = list(title = "Month"), yaxis = list(title = "Number of Incidents"))
+
+```
+
+
+#### Initial high level predictions showed that across NY, shooting incidents are predicted to spike in March and September, with an expected dip between June and August. This is contrary to the seasonality observed earlier in the report.
+
+
+
+### Borough-level predictions: Predicting the monthly number of shooting incidents for each borough in 2023.
+
+
+```{r pred_model2, echo = TRUE, message=FALSE}
+incidents_by_date_borough <- nypd_data %>%
+  mutate(date = as.Date(OCCUR_DATE, "%m/%d/%Y")) %>%
+  group_by(BORO, date) %>%
+  summarise(total_incidents = n())
+
+incidents_by_month_borough <- incidents_by_date_borough %>%
+  mutate(month = as.Date(cut(date, breaks = "month"))) %>%
+  group_by(BORO, month) %>%
+  summarise(total_incidents = sum(total_incidents))
+
+forecast_values_list <- list()
+
+for (borough in unique(incidents_by_month_borough$BORO)) {
+  borough_data <- filter(incidents_by_month_borough, BORO == borough)
+  
+  borough_ts <- ts(borough_data$total_incidents, start = c(2006, 1), frequency = 12)
+  
+  sarima_model <- auto.arima(borough_ts, seasonal = TRUE)
+  
+  forecast_values <- forecast(sarima_model, h = 12)
+  
+  combined_data <- bind_rows(borough_data, data.frame(BORO = rep(borough, 12), month = seq(as.Date("2023-01-01"), as.Date("2023-12-31"), by = "month"), total_incidents = forecast_values$mean))
+  
+  forecast_values_list[[borough]] <- combined_data
+}
+
+forecast_values <- bind_rows(forecast_values_list)
+
+forecast_values <- filter(forecast_values, month >= as.Date("2021-01-01"))
+
+
+plot_ly(forecast_values, x = ~month, y = ~total_incidents, color = ~BORO, line = list(dash = "solid"), type = "scatter", mode = "lines") %>%
+  layout(title = "Predicted Number of Shooting Incidents by Borough and Month in 2023", xaxis = list(title = "Month"), yaxis = list(title = "Number of Incidents"), showlegend = TRUE)
+
+```
+
+### Predicting the number of shooting incidents that will occur for each month in 2023.
+
+
+#### Borough level shooting incident patterns are quite different from one another, so here are shooting incident predictions done at the borough level. The spikes and dips seem to reflect the seasonality from the past 2 years.
+
+#### Since the seasonality is better reflected at the borough level than at the overall level, these borough-level predictions are aggregated to get overall shooting incident predictions. 
+
+
+
+```{r pred_model3, echo = TRUE}
+
+agg_boro_predictions <- forecast_values %>%
+  group_by(month) %>%
+  summarise(total_incidents = sum(total_incidents))
+
+#Aggregating the borough level predictions to see if this results in overall projections that reflect seasonality better
+plot_ly(agg_boro_predictions, x = ~month, y = ~total_incidents, line = list(dash = "solid"), type = "scatter", mode = "lines") %>%
+  layout(title = "Predicted Number of Shooting Incidents by Month in 2023", xaxis = list(title = "Month"), yaxis = list(title = "Number of Incidents"), showlegend = FALSE)
+
+```
+
+
+#### These aggregated overall predictions are more reflective of the seasonality from the past few years, with an expected spike between July and August, and drops between January and February, and again in November. Because the seasonality closer to what was observed, we can be more confident in these predictions.
+
+
+
+
+### Questions for future analysis
+1. How does the number of shooting incidents per borough relate to the population?
+2. What landmarks are near areas with the most shootings?
+3. How is the fatality rate related to response time to the incident and proximity to hospitals?
+
+## Bias Indentification
+Some potential sources of bias in this analysis include:
+
+1. **Underreporting and sampling bias**: The dataset in this analysis only includes information about shooting incidents that were reported to the authorities. There may be shooting incidents that are not reported, which would lead to underreporting bias and underrepresentation of the actual number of shooting incidents. It could also lead to sampling bias where the reported incidents may not be representative of all shooting incidents that occurred.
+
+2. **Reporting bias**: The completeness and accuracy of information reported may vary depending on the officer that reports the incident and the circumstances. This can lead to incomplete or inaccurate data for some incidents.
+
+3. **Geographic bias**: If law enforcement is more active or available in certain geographic regions, more incidents are likely to be reported.
+
+4. **Jurisdiction bias**: Depending on whether an incident occurred under NYPD jurisdiction or not, there could be differences in the way incidents are handled and reported.
+
+
+#### Personal Bias
+I identified some personal bias during this process as well. When I plotted the graph of number of shooting incidents by borough, I related the names of the top boroughs to common perceptions I've heard in mainstream media as boroughs with more crime. In order to get a more accurate idea of crime rate, I would at least, need to put these numbers in perspective with the population size of each borough.
+
+
+# Conclusion
+
+The number of reported shooting incidents was fairly stable from 2006 to 2017. There was a drop in incidents reported between 2017 and 2019, and peaked in the summer of 2020. After this time, the number of shooting incidents returned to pre-2017 levels.
+
+There does seem to be seasonality present within the year: A greater number of incidents occur in the summer, between June and August of each year, while shooting incidents are least likely to occur in February.
+
+There is also seasonality within the week: The number of shooting incidents spikes over the weekend, on Saturdays and Sundays.
+
+Predictions for shooting incidents for the next year reflect the monthly seasonality, though an overall reduction in number of shooting incidents is predicted.
